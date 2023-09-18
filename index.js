@@ -2,7 +2,6 @@ const express = require('express');
 const mariadb = require('mariadb');
 const multer = require('multer');
 const XLSX = require('xlsx');
-const Path = require("path")
 
 const app = express();
 const port = 3000;
@@ -29,10 +28,12 @@ app.get('/', (req, res) => {
 });
 
 
+const CHUNK_SIZE = 4000; // Tamaño de cada bloque
+
 app.post('/upload', upload.single('excelFile'), async (req, res) => {
   try {
     const { buffer, originalname = "" } = req.file;
-    const [filename] = originalname.split(".")
+    const [tableName] = originalname.split(".")
     const workbook = XLSX.read(buffer, { type: 'buffer' });
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
@@ -40,13 +41,51 @@ app.post('/upload', upload.single('excelFile'), async (req, res) => {
 
     let conn = await pool.getConnection();
 
-    for (let row of rows) {
-      const columns = Object.keys(row).join(', ');
-      const placeholders = Object.keys(row).map(() => '?').join(', ');
-      const values = Object.values(row);
-      const query = `INSERT INTO ${filename} (${columns}) VALUES (${placeholders})`;
-      await conn.query(query, values);
+    const columns = Object.keys(rows[0]).join(', ');
+    const placeholdersPerRow = `(${new Array(Object.keys(rows[0]).length).fill('?').join(', ')})`;
+
+    // Divide los datos en bloques
+    // for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+    //   const chunk = rows.slice(i, i + CHUNK_SIZE);
+
+    //   // Preparar los datos para la inserción en bloque
+    //   const values = chunk.map(row => Object.values(row));
+
+    //   const columns = Object.keys(chunk[0]).join(', ');
+    //   const placeholders = values.map(() => `(${new Array(Object.keys(chunk[0]).length).fill('?').join(', ')})`).join(', ');
+
+    //   const query = `INSERT INTO ${tableName} (${columns}) VALUES ${placeholders}`;
+    //   await conn.batch(query, values.flat());
+    //   console.log(`Lote ${(i / CHUNK_SIZE) + 1} / ${rows.length} terminado`);
+    // }
+
+    const allColumns = Object.keys(rows[0]);
+
+    // Función para asegurarse de que cada fila tenga todos los campos
+    function normalizeRow(row) {
+      const normalized = { ...row };
+      for (const col of allColumns) {
+        if (!(col in normalized)) {
+          normalized[col] = null; // o cualquier valor por defecto que desees
+        }
+      }
+      return normalized;
     }
+
+    // Divide los datos en bloques
+    for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
+      const chunk = rows.slice(i, i + CHUNK_SIZE).map(normalizeRow); // Normaliza cada fila
+
+      const values = chunk.flatMap(row => {
+        return allColumns.map(col => (row[col] !== undefined && row[col] !== '') ? row[col] : null);
+      });
+      const placeholders = new Array(chunk.length).fill(placeholdersPerRow).join(', ');
+
+      const query = `INSERT INTO ${tableName} (${columns}) VALUES ${placeholders}`;
+      await conn.query(query, values);
+      console.log(`Lote ${(i / CHUNK_SIZE) + 1} / ${Math.ceil(rows.length / CHUNK_SIZE)} terminado`);
+    }
+
 
     res.send(`
     Datos guardados exitosamente!<br><br>
@@ -54,7 +93,10 @@ app.post('/upload', upload.single('excelFile'), async (req, res) => {
 `);
   } catch (err) {
     console.error(err);
-    res.status(500).send('Error al guardar en la base de datos');
+    res.status(500).send(`
+    Error al guardar en la base de datos!<br><br>
+    <button onclick="window.history.back();">Regresar</button>
+`);
   }
 });
 
